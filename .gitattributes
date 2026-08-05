@@ -1,0 +1,15 @@
+# Development is on Windows but deployment is to Linux, and push-code.ps1 ships
+# the working copy verbatim. A shell script checked out with CRLF fails on the
+# instance with a bare `$'\r': command not found`, and systemd rejects units
+# whose directives carry a trailing \r. So these stay LF even on Windows.
+*.sh      text eol=lf
+*.service text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# PowerShell stays native to the platform that runs it.
+*.ps1     text eol=crlf
+
+# Never let line-ending normalization near captured data or fixtures.
+*.db      binary
+*.bak     binary

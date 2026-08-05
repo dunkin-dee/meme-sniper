@@ -1,0 +1,247 @@
+# meme-sniper configuration
+#
+# Every threshold, budget and weight lives here. Code must not hardcode these.
+# Phase 1 is a measurement exercise: these values are STARTING GUESSES seeded from
+# pre-BOOST literature. They are expected to be wrong. The analysis notebook exists
+# to replace them with numbers measured from our own post-BOOST data.
+
+database:
+  path: "data/sniper.db"
+
+logging:
+  level: "INFO"
+  # Firehose events are high-volume; log a heartbeat rather than every event.
+  heartbeat_seconds: 60
+
+# ---------------------------------------------------------------------------
+# Tier 0 - PumpPortal free firehose
+# ---------------------------------------------------------------------------
+pumpportal:
+  url: "wss://pumpportal.fun/api/data"
+  # subscribeNewToken and subscribeMigration are FREE.
+  # subscribeTokenTrade / subscribeAccountTrade are METERED (0.01 SOL per 10k
+  # events + funded wallet) - deliberately unused, see plan.
+  subscriptions:
+    - "subscribeNewToken"
+    - "subscribeMigration"
+  # subscribeNewToken carries BOTH pump.fun and bonk.fun launches (verified live:
+  # ~98% pump / ~2% bonk, with different payload shapes). Everything is recorded
+  # at Tier 0 because it is free and makes a LetsBonk expansion a config change;
+  # only these pools are promoted into the enrichment tiers. Scope is pump.fun.
+  promote_pools:
+    - "pump"
+  # PumpPortal docs: do NOT open a connection per token. One connection, all
+  # subscriptions multiplexed. Repeated reconnects trigger hourly bans.
+  reconnect:
+    initial_seconds: 1.0
+    max_seconds: 300.0
+    multiplier: 2.0
+    jitter: 0.25
+
+# ---------------------------------------------------------------------------
+# Solana RPC (Helius free tier: 1M credits/month, 10 RPS)
+# ---------------------------------------------------------------------------
+rpc:
+  # Set HELIUS_API_KEY in the environment; falls back to public mainnet RPC.
+  url: "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+  fallback_url: "https://api.mainnet-beta.solana.com"
+  max_rps: 8              # headroom under the 10 RPS free-tier ceiling
+  timeout_seconds: 15
+  max_accounts_per_call: 100   # getMultipleAccounts hard limit
+
+# Credit budget. Naive polling of 200 tokens every 5s consumes the ENTIRE
+# 1M monthly free quota, so this is enforced, not advisory.
+budget:
+  monthly_credits: 1_000_000
+  stop_at_fraction: 0.90       # hard-stop new RPC work at 90% of quota
+  warn_at_fraction: 0.70
+
+# ---------------------------------------------------------------------------
+# Pump.fun on-chain constants
+# ---------------------------------------------------------------------------
+pumpfun:
+  program_id: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+  # Graduation triggers at 115 total virtual SOL (~85 real + 30 virtual).
+  graduation_virtual_sol: 115.0
+  lamports_per_sol: 1_000_000_000
+  # BOOST (live 2026-07-21) reinjects ~17.6 SOL as buyback/burn in the first
+  # 5 minutes post-migration. Recorded for analysis, not assumed in scoring.
+  boost_active_from: "2026-07-21"
+  boost_reinject_sol: 17.6
+
+# ---------------------------------------------------------------------------
+# Program assumption checks (`sniper verify-program`)
+# ---------------------------------------------------------------------------
+# Everything downstream assumes pump.fun mints are safe by construction and that
+# the bonding-curve byte layout is what the IDL says. Both are properties of a
+# closed-source program that has shipped breaking changes twice (cashback,
+# BOOST). This is the regression canary: run it after any suspected upgrade.
+verify:
+  sample_size: 20
+  # MEASURED 2026-08-03: pump.fun mints are Token-2022, NOT plain SPL Token
+  # (60/60). Widely-repeated documentation says otherwise. Both ids are accepted
+  # because the mint program is exactly the kind of thing that changes silently.
+  allowed_token_programs:
+    - "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"   # Token-2022 (current)
+    - "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"   # SPL Token (legacy)
+  # Token-2022 is only dangerous through its extensions. Observed 60/60 carrying
+  # MetadataPointer(18) + TokenMetadata(19) and nothing else - i.e. it is used
+  # for on-chain metadata, not for control over holders. These ids are the ones
+  # that can tax, seize, freeze or block a sale, and any of them appearing on a
+  # pump mint is a hard stop.
+  hostile_extensions:
+    1: "TransferFeeConfig"     # skims every transfer
+    3: "MintCloseAuthority"    # can close the mint
+    6: "DefaultAccountState"   # can freeze new holders by default
+    9: "NonTransferable"       # cannot be sold at all
+    12: "PermanentDelegate"    # can move tokens out of any wallet
+    14: "TransferHook"         # arbitrary code on every transfer
+  expected_decimals: 6
+  # k residual above this means the decode is wrong, not that the curve moved:
+  # k is invariant at every point of a STANDARD curve, so trading cannot break
+  # it. Live frames measured 1.2e-16; 1e-6 is enormous headroom and still
+  # catches a misaligned offset, which yields residuals of order 1.
+  #
+  # Mayhem-mode tokens are excluded: they do not obey k at all (see below).
+  max_k_residual: 0.000001
+  # MEASURED 2026-08-03, n=37, perfect separation: every is_mayhem_mode token
+  # violates k and every non-mayhem token satisfies it. Mayhem curves are a
+  # different mechanism, not a different constant. Set false only to re-test
+  # that finding.
+  exclude_mayhem_from_k: true
+  # Anchor discriminator for the BondingCurve account, from idl/pump.json.
+  bonding_curve_discriminator: [23, 183, 248, 55, 96, 216, 172, 96]
+
+# ---------------------------------------------------------------------------
+# Tier 1 - metadata gate (free; strongest published signal)
+# ---------------------------------------------------------------------------
+metadata:
+  ipfs_gateways:
+    - "https://ipfs.io/ipfs/"
+    - "https://cloudflare-ipfs.com/ipfs/"
+    - "https://gateway.pinata.cloud/ipfs/"
+  timeout_seconds: 8
+  max_concurrent: 12
+  cache_ttl_seconds: 86400
+  # Promote to Tier 2 only if at least this many socials are present.
+  # Pre-BOOST evidence: telegram alone 8.94x lift, all three 17.4x.
+  min_socials_to_promote: 1
+  require_telegram: false      # set true for a much harsher, higher-precision gate
+
+# ---------------------------------------------------------------------------
+# Tier 2 - safety + deployer enrichment
+# ---------------------------------------------------------------------------
+rugcheck:
+  base_url: "https://api.rugcheck.xyz/v1"
+  # 10/min unauthenticated, 60/min authenticated (RUGCHECK_API_KEY env var).
+  # This is a genuine bottleneck - must never be called on the firehose.
+  max_per_minute: 9
+  timeout_seconds: 12
+  # Reject outright on these.
+  max_top10_holder_pct: 40.0
+  max_dev_holding_pct: 15.0
+  reject_on_insider_network: true
+
+deployer:
+  max_signatures_lookback: 200
+  # Deployers with many prior launches and zero graduations are the classic
+  # serial-rugger signature.
+  reject_if_prior_launches_over: 25
+  reject_if_prior_launches_over_and_grad_rate_below: 0.005
+  fresh_wallet_max_age_hours: 24
+
+# ---------------------------------------------------------------------------
+# Tier 3 - curve tracking
+# ---------------------------------------------------------------------------
+tracking:
+  max_watchlist: 150
+  # Polling decay keeps the credit budget survivable.
+  schedule:
+    - { until_age_seconds: 300,    interval_seconds: 5 }
+    - { until_age_seconds: 3600,   interval_seconds: 30 }
+    - { until_age_seconds: 86400,  interval_seconds: 300 }
+    - { until_age_seconds: 604800, interval_seconds: 3600 }
+  # Drop from the watchlist early if it is clearly going nowhere.
+  drop_if_vsol_below_after_seconds: { seconds: 600, virtual_sol: 32.0 }
+
+# ---------------------------------------------------------------------------
+# Scoring - transparent weighted scorecard
+# ---------------------------------------------------------------------------
+# NOT a fitted model. Zero post-BOOST labels exist, so any fitted model would be
+# fabricated confidence. Weights seeded from published effect sizes; every alert
+# persists its full feature vector so decisions stay reconstructible.
+scoring:
+  alert_threshold: 60.0
+  weights:
+    has_telegram: 18.0          # Cox HR 5.40, 8.94x graduation lift
+    has_twitter: 8.0
+    has_website: 6.0
+    all_three_socials: 10.0     # bonus on top; 17.4x combined lift
+    fast_accumulation: 25.0     # trades_to_reach_vsol - strongest predictor, INVERSE
+    high_non_bot_share: 12.0    # >=70% non-bot sits above baseline
+    sol_velocity: 10.0
+    unique_buyer_growth: 8.0
+    low_top10_concentration: 12.0
+    dev_has_not_sold: 10.0
+    deployer_track_record: 6.0  # only separates at later curve stages - weighted low
+  penalties:
+    dev_sold: -40.0
+    insider_network_flagged: -35.0
+    bundle_signature: -30.0
+    high_fresh_wallet_share: -15.0
+
+features:
+  # Checkpoints for trades_to_reach_vsol. Reaching a given vSOL in FEWER trades
+  # predicts graduation far better than raw trade count (large-ticket conviction
+  # beats bot micro-churn).
+  trade_checkpoints: [10, 50, 100, 500, 1000]
+  vsol_checkpoints: [35.0, 45.0, 60.0, 80.0, 100.0]
+  non_bot_share_threshold: 0.70
+  # Approximate, not the paper's frontend-vs-direct-call proxy. Recorded as such.
+  bot_trade_size_sol_below: 0.05
+
+# ---------------------------------------------------------------------------
+# Target definition - what counts as "shoots up"
+# ---------------------------------------------------------------------------
+# Made falsifiable on purpose. The drawdown clause matters: a token that dumps
+# 80% then 5x's off the bottom is not a trade you survive.
+target:
+  primary:
+    multiple: 3.0
+    within_hours: 168          # 7 days
+    min_hours: 1
+    max_drawdown_before_peak: 0.50
+  # Also recorded so the target can be re-cut in analysis without re-collecting.
+  also_record_multiples: [2.0, 5.0, 10.0]
+  label_horizons_hours: [1, 24, 168]
+
+# ---------------------------------------------------------------------------
+# Paper trading - deliberately pessimistic. Optimistic fills are how paper
+# strategies lie.
+# ---------------------------------------------------------------------------
+paper:
+  enabled: true
+  position_size_sol: 0.5
+  max_concurrent_positions: 10
+  entry:
+    fill_at: "next_observed_price"
+    slippage_pct: 0.5
+  fees:
+    pumpfun_fee_pct: 1.0       # each way
+    priority_fee_sol: 0.001
+  exit:
+    take_profit_ladder:
+      - { multiple: 2.0, sell_fraction: 0.5 }
+      - { multiple: 5.0, sell_fraction: 0.3 }
+      - { multiple: 10.0, sell_fraction: 0.2 }
+    stop_loss_pct: 50.0
+    time_stop_hours: 168
+
+# ---------------------------------------------------------------------------
+# Alerting
+# ---------------------------------------------------------------------------
+alerts:
+  console: true
+  telegram:
+    enabled: false             # set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+    min_score: 70.0

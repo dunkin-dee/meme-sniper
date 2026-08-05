@@ -1,0 +1,45 @@
+# Litestream: continuous replication of the SQLite WAL.
+#
+# CRITICAL: the replica bucket MUST NOT live in the same AWS account that runs
+# this instance. A new-account AWS Free plan closes the account automatically
+# 6 months after signup, and "access to current resources and data will be
+# lost" - which would destroy the EC2 instance and a same-account S3 bucket in
+# the same stroke. A backup that dies with the thing it is backing up is not a
+# backup.
+#
+# Use Backblaze B2 or Cloudflare R2 (both S3-compatible, both have free/cheap
+# tiers well above the ~2 GB/month this produces).
+#
+# Credentials come from /etc/meme-sniper/litestream.env:
+#   LITESTREAM_ACCESS_KEY_ID=...
+#   LITESTREAM_SECRET_ACCESS_KEY=...
+
+dbs:
+  - path: /opt/meme-sniper/data/sniper.db
+    replicas:
+      - name: offsite
+        type: s3
+
+        # --- Backblaze B2 (recommended) ---
+        bucket: CHANGE-ME-bucket-name
+        path: meme-sniper/sniper.db
+        endpoint: s3.us-west-004.backblazeb2.com   # match YOUR bucket's region
+        region: us-west-004
+        force-path-style: true
+
+        # --- Cloudflare R2 alternative ---
+        # endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+        # region: auto
+        # force-path-style: true
+
+        # Ship WAL segments every 10s: worst-case loss is ~10 seconds of
+        # launches rather than hours.
+        sync-interval: 10s
+
+        # Keep 30 days of point-in-time restore. At ~2 GB/month of database
+        # growth this stays inside a free/cheap bucket tier.
+        retention: 720h
+        retention-check-interval: 12h
+
+        # Full snapshot daily so a restore never has to replay 30 days of WAL.
+        snapshot-interval: 24h

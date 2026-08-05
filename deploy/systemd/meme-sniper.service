@@ -1,0 +1,46 @@
+[Unit]
+Description=meme-sniper pump.fun launch recorder
+Documentation=file:///opt/meme-sniper/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sniper
+Group=sniper
+WorkingDirectory=/opt/meme-sniper
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/meme-sniper/env
+ExecStart=/opt/meme-sniper/.venv/bin/python -m sniper.main record
+
+# The recorder already reconnects internally with backoff. This is the outer
+# net for process death (OOM, unhandled fault, host reboot). Every gap here is
+# launches that can never be backfilled, so restart is unconditional.
+Restart=always
+RestartSec=10s
+# Do NOT set StartLimitBurst/StartLimitIntervalSec so systemd can never give up
+# and leave the recorder stopped overnight.
+StartLimitIntervalSec=0
+
+# The recorder shuts down cleanly on SIGINT (flushes and closes SQLite).
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Hardening. The process needs outbound network and its own data dir, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/meme-sniper/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meme-sniper
+
+[Install]
+WantedBy=multi-user.target

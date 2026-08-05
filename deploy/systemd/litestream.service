@@ -1,0 +1,32 @@
+[Unit]
+Description=Litestream continuous replication of the sniper database
+Documentation=file:///opt/meme-sniper/docs/DEPLOY.md
+After=network-online.target meme-sniper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sniper
+Group=sniper
+# Bucket credentials. MUST point at a NON-AWS bucket: this EC2 account
+# auto-closes at 6 months and takes any same-account S3 bucket with it.
+EnvironmentFile=/etc/meme-sniper/litestream.env
+ExecStart=/usr/bin/litestream replicate -config /etc/meme-sniper/litestream.yml
+
+Restart=always
+RestartSec=10s
+StartLimitIntervalSec=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Litestream needs write access to the DB directory for its shadow WAL.
+ReadWritePaths=/opt/meme-sniper/data
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=litestream
+
+[Install]
+WantedBy=multi-user.target

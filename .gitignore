@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Collected data. Irreplaceable (it cannot be backfilled) but far too large and
+# too personal to version - back it up separately.
+data/
+*.db
+*.db-wal
+*.db-shm
+*.bak
+
+.env
+notebooks/.ipynb_checkpoints/
