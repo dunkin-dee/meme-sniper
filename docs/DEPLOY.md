@@ -134,7 +134,7 @@ journalctl -u litestream -n 30
 
 ```bash
 journalctl -u meme-sniper -f
-sudo -u sniper /opt/meme-sniper/.venv/bin/python -m sniper.main stats
+sniper stats
 ```
 
 ---
@@ -149,7 +149,7 @@ This matters because a throttled stream is invisible — it looks exactly like a
 quiet market.
 
 ```bash
-sudo -u sniper /opt/meme-sniper/.venv/bin/python -m sniper.main ratecheck --hours 1
+sniper ratecheck --hours 1
 ```
 
 Compares against the **1,500–2,700 launches/hour** measured from a residential

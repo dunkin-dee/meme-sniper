@@ -4,6 +4,11 @@ Documentation=file:///opt/meme-sniper/docs/DEPLOY.md
 After=network-online.target meme-sniper.service
 Wants=network-online.target
 
+# [Unit], not [Service] - systemd ignores these in [Service]. See the note in
+# meme-sniper.service.
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
 [Service]
 Type=simple
 User=sniper
@@ -15,7 +20,6 @@ ExecStart=/usr/bin/litestream replicate -config /etc/meme-sniper/litestream.yml
 
 Restart=always
 RestartSec=10s
-StartLimitIntervalSec=0
 
 NoNewPrivileges=true
 PrivateTmp=true

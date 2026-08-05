@@ -26,7 +26,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$sshArgs = @()
+# `.backup` on a multi-GB database is slow and silent; without keepalives an
+# idle-timed-out channel leaves this hanging on a half-open socket.
+$sshArgs = @("-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6")
 if ($KeyFile) { $sshArgs += @("-i", $KeyFile) }
 $target = "$User@$RemoteHost"
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"

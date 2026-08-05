@@ -4,6 +4,14 @@ Documentation=file:///opt/meme-sniper/docs/DEPLOY.md
 After=network-online.target
 Wants=network-online.target
 
+# Rate-limit directives live in [Unit], NOT [Service]. systemd silently ignored
+# these when they sat in [Service] ("Unknown key name ... ignoring", observed
+# 2026-08-05), which left the default 5-starts-in-10s limit in force - exactly
+# the case where a network flap could exhaust the burst and leave the recorder
+# stopped overnight. Every gap is launches that can never be backfilled.
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
 [Service]
 Type=simple
 User=sniper
@@ -18,9 +26,6 @@ ExecStart=/opt/meme-sniper/.venv/bin/python -m sniper.main record
 # launches that can never be backfilled, so restart is unconditional.
 Restart=always
 RestartSec=10s
-# Do NOT set StartLimitBurst/StartLimitIntervalSec so systemd can never give up
-# and leave the recorder stopped overnight.
-StartLimitIntervalSec=0
 
 # The recorder shuts down cleanly on SIGINT (flushes and closes SQLite).
 KillSignal=SIGINT

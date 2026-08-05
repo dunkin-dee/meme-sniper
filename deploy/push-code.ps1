@@ -33,7 +33,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$sshArgs = @()
+# bootstrap.sh runs apt-get with -qq, which can emit nothing for ~20 minutes on
+# a t3.micro. A silent SSH channel gets dropped by NAT/idle timeouts; when that
+# happened the remote bootstrap took SIGHUP and died while this script sat on a
+# half-open socket for another 48 minutes without noticing (observed
+# 2026-08-05). Keepalives make the channel non-idle AND make a genuine drop
+# fail fast instead of hanging.
+$sshArgs = @("-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=6")
 if ($KeyFile) { $sshArgs += @("-i", $KeyFile) }
 $target = "$User@$RemoteHost"
 
@@ -71,8 +77,66 @@ if ($NoBootstrap) {
     exit 0
 }
 
-Write-Host "==> Running bootstrap.sh (idempotent)" -ForegroundColor Cyan
-& ssh @sshArgs $target "sudo REPO_SRC=/tmp/meme-sniper-src bash /tmp/meme-sniper-src/deploy/bootstrap.sh"
-if ($LASTEXITCODE -ne 0) { throw "bootstrap failed (exit $LASTEXITCODE)" }
+# Run bootstrap DETACHED (setsid, output to a log, exit code to a sentinel)
+# rather than as a foreground SSH command. A dropped connection then costs us
+# only the log tail - the provisioning keeps running on the instance and we
+# reattach on the next poll. Tying a 20-minute install to the lifetime of one
+# TCP connection is what broke this before.
+Write-Host "==> Running bootstrap.sh (detached, idempotent)" -ForegroundColor Cyan
+
+$launch = @'
+sudo rm -f /tmp/bootstrap.log /tmp/bootstrap.done
+sudo setsid bash -c 'REPO_SRC=/tmp/meme-sniper-src bash /tmp/meme-sniper-src/deploy/bootstrap.sh >/tmp/bootstrap.log 2>&1; echo $? >/tmp/bootstrap.done' </dev/null >/dev/null 2>&1 &
+sleep 1; echo detached
+'@
+& ssh @sshArgs $target $launch
+if ($LASTEXITCODE -ne 0) { throw "could not launch bootstrap (exit $LASTEXITCODE)" }
+
+$shown = 0
+$deadline = (Get-Date).AddMinutes(45)
+$exitCode = $null
+
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 10
+
+    # A failed poll is transient (connection blip); keep waiting rather than
+    # aborting a provision that is still running perfectly well remotely.
+    #
+    # PowerShell 5.1 wraps a native command's stderr in a NativeCommandError,
+    # which $ErrorActionPreference='Stop' promotes to TERMINATING - so an
+    # ordinary "connection timed out" killed this loop outright instead of
+    # retrying. Drop to Continue for the call and test $LASTEXITCODE by hand.
+    $poll = $null
+    try {
+        $ErrorActionPreference = "Continue"
+        $poll = & ssh @sshArgs $target `
+            "tail -n +$($shown + 1) /tmp/bootstrap.log 2>/dev/null; echo '::MARK::'; cat /tmp/bootstrap.done 2>/dev/null"
+    } catch {
+        $poll = $null
+    } finally {
+        $ErrorActionPreference = "Stop"
+    }
+    if ($null -eq $poll -or $LASTEXITCODE -ne 0) {
+        Write-Host "    (poll failed, retrying)" -ForegroundColor DarkGray
+        continue
+    }
+
+    $lines = @($poll)
+    $mark = [array]::IndexOf($lines, "::MARK::")
+    if ($mark -lt 0) { continue }
+
+    if ($mark -gt 0) {
+        $lines[0..($mark - 1)] | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        $shown += $mark
+    }
+
+    if ($lines.Count -gt $mark + 1 -and $lines[$mark + 1] -match '^\d+$') {
+        $exitCode = [int]$lines[$mark + 1]
+        break
+    }
+}
+
+if ($null -eq $exitCode) { throw "bootstrap did not finish within 45 min - ssh in and check /tmp/bootstrap.log" }
+if ($exitCode -ne 0)     { throw "bootstrap failed (exit $exitCode) - see /tmp/bootstrap.log on the instance" }
 
 Write-Host "==> Done. Next: configure Litestream, then run ratecheck after ~1h." -ForegroundColor Green

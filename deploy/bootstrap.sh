@@ -22,8 +22,13 @@ fi
 log "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# Deliberately NOT python3-pip: on Ubuntu 24.04 it drags in the whole
+# build-essential/g++-13 chain, which took ~10 minutes of downloads on a
+# t3.micro (measured 2026-08-05). Nothing here needs a compiler - every
+# dependency is pure Python or ships a manylinux wheel - and python3-venv
+# already provides pip inside the venv via ensurepip.
 apt-get install -y -qq \
-  python3 python3-venv python3-pip \
+  python3 python3-venv \
   sqlite3 rsync curl ca-certificates chrony unattended-upgrades
 
 # Accurate clock matters: received_at is our only time reference on launch
@@ -61,15 +66,25 @@ chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 log "Installing Litestream"
 if ! command -v litestream >/dev/null 2>&1; then
   ARCH=$(dpkg --print-architecture)   # amd64 | arm64
+  # Litestream renamed its release assets at 0.5.x: `litestream-v0.3.13-linux-
+  # amd64.deb` became `litestream-0.5.16-linux-x86_64.deb`. dpkg says "amd64",
+  # so match BOTH spellings or x86 silently finds nothing (it did, 2026-08-05).
+  # arm64 is spelled the same either way.
+  case "$ARCH" in
+    amd64) LS_ARCH='(amd64|x86_64)' ;;
+    arm64) LS_ARCH='arm64' ;;
+    *)     LS_ARCH="$ARCH" ;;
+  esac
   TMP=$(mktemp -d)
-  LS_URL=$(curl -fsSL https://api.github.com/repos/benbjohnson/litestream/releases/latest \
-    | grep -o "https://[^\"]*linux-${ARCH}\.deb" | head -1)
+  LS_URL=$(curl -fsSL --max-time 30 https://api.github.com/repos/benbjohnson/litestream/releases/latest \
+    | grep -oE "https://[^\"]*/releases/download/[^\"]*linux-${LS_ARCH}\.deb" | head -1)
   if [[ -z "$LS_URL" ]]; then
     echo "WARNING: could not resolve a Litestream .deb for ${ARCH}; install manually." >&2
   else
-    curl -fsSL "$LS_URL" -o "$TMP/litestream.deb"
+    curl -fsSL --max-time 120 --retry 3 "$LS_URL" -o "$TMP/litestream.deb"
     dpkg -i "$TMP/litestream.deb"
     rm -rf "$TMP"
+    litestream version
   fi
 fi
 # Litestream ships its own unit; ours supersedes it.
@@ -96,6 +111,17 @@ EOF
 fi
 chmod 600 "$ETC_DIR"/litestream.env "$ETC_DIR"/env
 
+log "Installing sniper CLI wrapper"
+# Config.load() resolves a bare "config.yaml" against the CWD. The service is
+# fine (WorkingDirectory=/opt/meme-sniper), but an operator running `stats` from
+# ~ubuntu got PermissionError on /home/ubuntu/config.yaml. Pin the path.
+cat > /usr/local/bin/sniper <<'EOF'
+#!/bin/sh
+exec sudo -u sniper /opt/meme-sniper/.venv/bin/python -m sniper.main \
+  --config /opt/meme-sniper/config.yaml "$@"
+EOF
+chmod 755 /usr/local/bin/sniper
+
 log "Installing systemd units"
 cp "$APP_DIR"/deploy/systemd/*.service /etc/systemd/system/
 systemctl daemon-reload
@@ -118,7 +144,7 @@ Recorder is running. Remaining manual steps:
 Then verify (see docs/DEPLOY.md):
 
   journalctl -u meme-sniper -f
-  sudo -u $APP_USER $APP_DIR/.venv/bin/python -m sniper.main stats
+  sniper stats
 
 IMPORTANT: run the throttling check after ~1 hour. If the launch rate is
 far below the ~1500-2700/h measured from a residential connection, this
