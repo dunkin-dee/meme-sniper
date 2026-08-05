@@ -8,38 +8,59 @@
 # backup.
 #
 # Use Backblaze B2 or Cloudflare R2 (both S3-compatible, both have free/cheap
-# tiers well above the ~2 GB/month this produces).
+# tiers).
 #
 # Credentials come from /etc/meme-sniper/litestream.env:
 #   LITESTREAM_ACCESS_KEY_ID=...
 #   LITESTREAM_SECRET_ACCESS_KEY=...
+#
+# ---------------------------------------------------------------------------
+# WRITTEN FOR LITESTREAM 0.5.x. Do not copy 0.3.x examples into this file.
+#
+# 0.5 moved retention/snapshot settings OUT of the replica block and up to a
+# global `snapshot:` block, and replaced the `replicas:` array with a single
+# `replica:`. Litestream IGNORES unrecognized keys instead of rejecting them -
+# verified 2026-08-05 by feeding it `bogus-key-xyz: 42`, which parsed cleanly
+# with exit 0. So a leftover `retention:` under the replica does not fail; it
+# silently leaves you on the 24h default while the config still *reads* as
+# though it keeps 30 days. Check `litestream --version` before trusting any
+# example you find online.
+# ---------------------------------------------------------------------------
+
+# Global, NOT per-replica. Per-database `snapshot:` blocks are promoted to
+# global anyway, and conflicting values fail at startup.
+snapshot:
+  # Full snapshot daily so a restore never replays a long chain of LTX files.
+  interval: 24h
+
+  # How far back point-in-time restore reaches. Each retained snapshot is a
+  # full copy, so this multiplies stored bytes by roughly (retention/interval)
+  # - here 7 copies. The database grows ~1.5-2.3 GB/month, so 30 days of daily
+  # snapshots would blow through B2's 10 GB free tier within weeks. 7 days is
+  # the compromise; raise it once you have measured real bucket growth.
+  # Overage on B2 is ~$0.006/GB/month, so this is a free-tier limit, not a
+  # cost limit.
+  retention: 168h
 
 dbs:
   - path: /opt/meme-sniper/data/sniper.db
-    replicas:
-      - name: offsite
-        type: s3
 
-        # --- Backblaze B2 (recommended) ---
-        bucket: CHANGE-ME-bucket-name
-        path: meme-sniper/sniper.db
-        endpoint: s3.us-west-004.backblazeb2.com   # match YOUR bucket's region
-        region: us-west-004
-        force-path-style: true
+    # Singular `replica` - 0.5 supports exactly one per database.
+    replica:
+      type: s3
 
-        # --- Cloudflare R2 alternative ---
-        # endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-        # region: auto
-        # force-path-style: true
+      # --- Backblaze B2 ---
+      bucket: CHANGE-ME-bucket-name
+      path: meme-sniper/sniper.db
+      endpoint: CHANGE-ME.backblazeb2.com   # match YOUR bucket's region
+      region: CHANGE-ME
+      force-path-style: true
 
-        # Ship WAL segments every 10s: worst-case loss is ~10 seconds of
-        # launches rather than hours.
-        sync-interval: 10s
+      # --- Cloudflare R2 alternative ---
+      # endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+      # region: auto
+      # force-path-style: true
 
-        # Keep 30 days of point-in-time restore. At ~2 GB/month of database
-        # growth this stays inside a free/cheap bucket tier.
-        retention: 720h
-        retention-check-interval: 12h
-
-        # Full snapshot daily so a restore never has to replay 30 days of WAL.
-        snapshot-interval: 24h
+      # Ship changes every 10s: worst-case loss is ~10 seconds of launches
+      # rather than hours. Still a valid replica-level key in 0.5.
+      sync-interval: 10s

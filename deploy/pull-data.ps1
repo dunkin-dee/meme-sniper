@@ -58,8 +58,32 @@ if ($lines[0] -ne "ok") {
     $lines | ForEach-Object { Write-Host "   $_" }
     exit 1
 }
+
+# integrity_check is NOT sufficient on its own: it returns "ok" for a zero-byte
+# file. A failed remote snapshot that produced an empty database would sail
+# through and overwrite the last good copy. Demand real rows.
+$rows = 0
+if (-not [int]::TryParse(($lines[1] -as [string]), [ref]$rows) -or $rows -le 0) {
+    Write-Host "PULLED DATABASE HAS NO LAUNCHES - not promoting" -ForegroundColor Red
+    $lines | ForEach-Object { Write-Host "   $_" }
+    exit 1
+}
+
+# launches is append-only, so the count must never shrink. A drop means a torn
+# snapshot, a reset database, or the wrong host - never a normal pull.
+$latest = Join-Path $LocalDir "sniper-latest.db"
+if (Test-Path $latest) {
+    $prevOut = & cmd /c "$py -c ""import sqlite3; print(sqlite3.connect(r'$latest').execute('SELECT COUNT(*) FROM launches').fetchone()[0])"" 2>&1"
+    $prev = 0
+    if ([int]::TryParse((@($prevOut)[0] -as [string]), [ref]$prev) -and $rows -lt $prev) {
+        Write-Host "ROW COUNT WENT BACKWARDS: $prev -> $rows - not promoting" -ForegroundColor Red
+        Write-Host "   kept at $localPath for inspection" -ForegroundColor Red
+        exit 1
+    }
+}
+
 Write-Host "    integrity: ok" -ForegroundColor Green
-Write-Host "    launches:  $($lines[1])" -ForegroundColor Green
+Write-Host "    launches:  $rows" -ForegroundColor Green
 
 # Promote to the stable path the analysis notebook reads.
 $latest = Join-Path $LocalDir "sniper-latest.db"

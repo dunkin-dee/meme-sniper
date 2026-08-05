@@ -40,6 +40,12 @@ log "Creating service user and directories"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
 mkdir -p "$APP_DIR"/data "$ETC_DIR"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+# litestream.service runs as $APP_USER and opens litestream.yml from here, so
+# the service user needs traverse rights on the directory. root:root 750 made
+# it fail on every start with "permission denied" (observed 2026-08-05).
+# Secrets stay root-only regardless: systemd reads litestream.env as root via
+# EnvironmentFile before dropping privileges.
+chown root:"$APP_USER" "$ETC_DIR"
 chmod 750 "$ETC_DIR"
 
 if [[ -n "$REPO_SRC" ]]; then
@@ -87,8 +93,12 @@ if ! command -v litestream >/dev/null 2>&1; then
     litestream version
   fi
 fi
-# Litestream ships its own unit; ours supersedes it.
-systemctl disable --now litestream >/dev/null 2>&1 || true
+# NOTE: do NOT `systemctl disable --now litestream` here to suppress the unit
+# shipped in the .deb. Ours has the same name, and a unit in
+# /etc/systemd/system already takes precedence over /lib/systemd/system - so
+# that call did nothing useful and instead STOPPED AND DISABLED replication on
+# every redeploy, silently, after the script printed success (observed
+# 2026-08-05). Replication is restarted at the end of this script instead.
 
 log "Installing config templates"
 [[ -f "$ETC_DIR/litestream.yml" ]] || cp "$APP_DIR/deploy/litestream.yml" "$ETC_DIR/litestream.yml"
@@ -109,7 +119,12 @@ if [[ ! -f "$ETC_DIR/env" ]]; then
 # TELEGRAM_CHAT_ID=
 EOF
 fi
+# Credentials: root-only. Config: readable by the service user (it holds only
+# a bucket name and endpoint, no secrets).
+chown root:root "$ETC_DIR"/litestream.env "$ETC_DIR"/env
 chmod 600 "$ETC_DIR"/litestream.env "$ETC_DIR"/env
+chown root:"$APP_USER" "$ETC_DIR"/litestream.yml
+chmod 640 "$ETC_DIR"/litestream.yml
 
 log "Installing sniper CLI wrapper"
 # Config.load() resolves a bare "config.yaml" against the CWD. The service is
@@ -131,6 +146,17 @@ log "Starting recorder"
 systemctl restart meme-sniper.service
 sleep 5
 systemctl --no-pager --lines=15 status meme-sniper.service || true
+
+# Bring replication back up if it has already been configured. A code push must
+# never be the reason backups stopped, and "still says success while the replica
+# goes stale" is the worst possible failure mode for irreplaceable data.
+if [[ -f "$ETC_DIR/litestream.yml" ]] && ! grep -q 'CHANGE-ME' "$ETC_DIR/litestream.yml"; then
+  log "Restarting replication"
+  systemctl enable litestream.service >/dev/null 2>&1 || true
+  systemctl restart litestream.service
+  sleep 3
+  systemctl is-active litestream.service || true
+fi
 
 cat <<EOF
 

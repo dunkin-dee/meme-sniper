@@ -187,10 +187,23 @@ Schedule it daily with Task Scheduler.
 ## Restoring from Litestream
 
 ```bash
-litestream restore -config /etc/meme-sniper/litestream.yml \
-  -o /tmp/restored.db /opt/meme-sniper/data/sniper.db
+# The credentials live in the systemd EnvironmentFile, so a bare `litestream
+# restore` has none - it falls back to an EC2 IMDS role that does not exist and
+# fails with "no EC2 IMDS role found". Source the env first. Do NOT pass the
+# keys as arguments; argv is world-visible in `ps`.
+sudo bash -c 'set -a; . /etc/meme-sniper/litestream.env; set +a; \
+  litestream restore -config /etc/meme-sniper/litestream.yml \
+    -o /tmp/restored.db /opt/meme-sniper/data/sniper.db'
+
 sqlite3 /tmp/restored.db "PRAGMA integrity_check; SELECT COUNT(*) FROM launches;"
 ```
+
+**`integrity_check` alone does not prove a restore worked** — it returns `ok`
+on a zero-byte file, which is exactly what the failed-credentials attempt
+produced. Always check the row count too, and compare it against the live
+database; it should trail by roughly `sync-interval`.
+
+Verified 2026-08-05: 5,820 rows restored against 5,821 live.
 
 **Test this once, early.** An untested backup is a hypothesis.
 
