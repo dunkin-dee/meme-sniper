@@ -49,12 +49,34 @@ $backupCmd = "sudo -u sniper sqlite3 $RemoteDb '.backup $remoteSnap' && sudo chm
 & ssh @sshArgs $target $backupCmd
 if ($LASTEXITCODE -ne 0) { throw "remote snapshot failed (exit $LASTEXITCODE)" }
 
+# Compress on the instance before transferring. The link from EC2 to a home
+# connection measured ~10 KB/s on 2026-08-06 (the instance's own downlink tested
+# at 71 MB/s, so the bottleneck is the last mile, not AWS). A 66 MB snapshot
+# would have taken ~1.8 hours, and the database only grows. launches.raw_json is
+# JSON text and compresses several-fold, so this is the difference between a
+# daily pull being routine and being impossible.
+Write-Host "==> Compressing snapshot remotely" -ForegroundColor Cyan
+# sudo: the snapshot is owned by the service user (sqlite3 ran as it), and gzip
+# replaces the file rather than just reading it, so running as the login user
+# fails with "Operation not permitted" under /tmp's sticky bit.
+& ssh @sshArgs $target "sudo gzip -6 -f $remoteSnap && sudo chmod 644 $remoteSnap.gz && ls -l $remoteSnap.gz"
+if ($LASTEXITCODE -ne 0) { throw "remote compression failed (exit $LASTEXITCODE)" }
+
 $localPath = Join-Path $LocalDir "sniper-$stamp.db"
-Write-Host "==> Transferring to $localPath" -ForegroundColor Cyan
-& scp @sshArgs "${target}:$remoteSnap" $localPath
+$localGz = "$localPath.gz"
+Write-Host "==> Transferring to $localGz" -ForegroundColor Cyan
+& scp @sshArgs "${target}:$remoteSnap.gz" $localGz
 if ($LASTEXITCODE -ne 0) { throw "scp failed (exit $LASTEXITCODE)" }
 
-& ssh @sshArgs $target "rm -f '$remoteSnap'" | Out-Null
+& ssh @sshArgs $target "sudo rm -f $remoteSnap $remoteSnap.gz" | Out-Null
+
+Write-Host "==> Decompressing" -ForegroundColor Cyan
+$py = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "py -3.11" }
+# Python's gzip rather than tar/Expand-Archive: guaranteed present via the venv
+# this project already requires, and it handles a bare .gz (not an archive).
+& cmd /c "$py -c ""import gzip,shutil; fh=gzip.open(r'$localGz','rb'); out=open(r'$localPath','wb'); shutil.copyfileobj(fh,out); out.close()"""
+if ($LASTEXITCODE -ne 0) { throw "decompression failed (exit $LASTEXITCODE)" }
+Remove-Item $localGz -Force
 
 Write-Host "==> Verifying integrity" -ForegroundColor Cyan
 $py = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "py -3.11" }
