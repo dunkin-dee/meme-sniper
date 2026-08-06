@@ -166,6 +166,23 @@ test; do not assume it.
   24h default. Verified by feeding it `bogus-key-xyz: 42` (exit 0).
 - **`PRAGMA integrity_check` returns `ok` on a zero-byte file.** Never gate a
   backup or a pull on it alone; check row counts too.
+- **Missing metadata is NOT missing at random — do not pool datasets for any
+  socials statistic.** Backfilling the 2026-08-03 local run on 2026-08-06
+  resolved only 64.5% (10,664/16,541), because entire hosts died at once
+  (`j7tracker` = 5,181 rows). The survivors are conditioned on which host a
+  token happened to use, and they look materially different from the
+  near-complete instance data:
+
+  | socials | local, 64.5% resolved | instance, 98.6% resolved |
+  |---|---|---|
+  | twitter | 65% | 73% |
+  | website | 39% | 51% |
+  | telegram | 2.9% | 2.0% |
+  | none | 32.5% | 23% |
+
+  Compute prevalence and lift on the instance data, where resolution is
+  near-complete. Treat the local run as launch/curve data whose socials column
+  is missing-not-at-random, and condition on `fetch_ok` explicitly.
 
 ---
 

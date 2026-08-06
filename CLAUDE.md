@@ -125,6 +125,13 @@ Not a git repo yet. `uv` is not installed; `node` and `git` are.
 - **`PRAGMA integrity_check` returns `ok` on a zero-byte file.** Never gate a
   backup or a data pull on it alone; check row counts too.
 
+- **Missing metadata is missing-NOT-at-random.** Backfilling the 2026-08-03
+  local run three days later resolved only 64.5%, because whole hosts died at
+  once. Survivors are conditioned on which host a token used, and their socials
+  distribution differs materially from the near-complete instance data (twitter
+  65% vs 73%, none 32.5% vs 23%). Compute prevalence and lift on the instance
+  data; never pool the two, and always condition on `fetch_ok`.
+
 ## Context that drives the design
 
 Pump.fun shipped **BOOST on 2026-07-21**, moving graduation rates from ~0.2% to
