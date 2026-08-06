@@ -38,7 +38,14 @@ New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
 
 Write-Host "==> Taking consistent snapshot on $RemoteHost" -ForegroundColor Cyan
 # sudo -u sniper so the snapshot is readable and respects file ownership.
-$backupCmd = "sudo -u sniper sqlite3 '$RemoteDb' `".backup '$remoteSnap'`" && sudo chmod 644 '$remoteSnap' && ls -l '$remoteSnap'"
+#
+# Quote with SINGLE quotes only. PowerShell 5.1 mangles embedded double quotes
+# when passing an argument to a native executable, so the previous
+# `".backup '$remoteSnap'"` arrived at the remote shell with its quoting
+# stripped and sqlite3 failed with "missing FILENAME argument on .backup" -
+# i.e. the backup path was broken on its first real use. Neither path contains
+# spaces, so single quotes are sufficient and survive the trip intact.
+$backupCmd = "sudo -u sniper sqlite3 $RemoteDb '.backup $remoteSnap' && sudo chmod 644 $remoteSnap && ls -l $remoteSnap"
 & ssh @sshArgs $target $backupCmd
 if ($LASTEXITCODE -ne 0) { throw "remote snapshot failed (exit $LASTEXITCODE)" }
 

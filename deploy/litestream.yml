@@ -27,6 +27,45 @@
 # example you find online.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Backblaze B2 free tier: 2,500 Class C (ListObjectsV2) transactions per DAY.
+# Class A (PutObject) is unlimited, so shipping data is free - what costs is
+# every periodic monitor that LISTS the bucket to decide what to do.
+#
+# Litestream 0.5's defaults assume a bucket with no such cap and blow through
+# it several times over before a single sync:
+#
+#   l0-retention-check-interval  15s  -> 5,760/day
+#   L1 compaction                30s  -> 2,880/day
+#   L2 compaction                 5m  ->   288/day
+#   sync-interval                10s  -> up to 8,640/day
+#
+# On 2026-08-06 this produced a hard failure, not a slowdown: B2 returned
+# `403 AccessDenied: Transaction cap exceeded` and replication stopped
+# entirely - compaction, L0 retention and sync all failing - while the service
+# still showed `active`. Backups being silently down is the worst outcome
+# here, so these intervals are deliberately far below the cap.
+#
+# Budget at the values below: ~1,440 (sync) + 144 (L1) + 24 (L2) + 4 (L3)
+# + 96 (L0 retention) + 1 (snapshot) ~= 1,700/day, ~68% of cap.
+#
+# The alternative is to raise the cap on B2's Caps & Alerts page. Class C
+# overage is $0.004/1,000, so even 10,000 extra transactions/day is ~$1.20 a
+# month - cheap if a tighter loss window is ever worth more than free.
+# ---------------------------------------------------------------------------
+
+# Position sets the level: first entry is L1, second L2, third L3.
+levels:
+  - interval: 10m    # L1 (default 30s)
+  - interval: 1h     # L2 (default 5m)
+  - interval: 6h     # L3 (default 1h)
+
+# L0 files are the raw per-transaction LTX stream. Keeping them longer and
+# checking less often costs a little storage and saves a lot of LIST calls;
+# the deletes themselves are Class A and free.
+l0-retention: 30m
+l0-retention-check-interval: 15m
+
 # Global, NOT per-replica. Per-database `snapshot:` blocks are promoted to
 # global anyway, and conflicting values fail at startup.
 snapshot:
@@ -61,6 +100,19 @@ dbs:
       # region: auto
       # force-path-style: true
 
-      # Ship changes every 10s: worst-case loss is ~10 seconds of launches
-      # rather than hours. Still a valid replica-level key in 0.5.
-      sync-interval: 10s
+      # Backblaze B2's free tier allows 2,500 Class B (GetObject/HeadObject)
+      # and 2,500 Class C (ListObjectsV2) transactions per DAY. Class A
+      # (PutObject) is unlimited, so the LTX uploads themselves are free - what
+      # costs is the list/head each sync cycle performs to work out what to
+      # ship. At the original 10s this was 8,640 cycles/day, ~3.5x over cap.
+      #
+      # 60s => 1,440 cycles/day, leaving headroom for snapshot, retention and
+      # compaction traffic. The cost is the worst-case loss window: up to ~60s
+      # of launches (~25 at current rates) instead of ~10s, and only if the
+      # instance dies outright rather than merely restarting - Litestream
+      # resumes from the local WAL across a normal restart. The daily
+      # pull-data.ps1 snapshot is the second line.
+      #
+      # Verify against B2's Caps & Alerts page after a full day; if Class C is
+      # still near the cap, raise this further rather than paying per request.
+      sync-interval: 60s
