@@ -14,11 +14,17 @@ is the Microsoft Store stub and fails.
 
 ```powershell
 .venv\Scripts\python.exe -m sniper.main record          # Tier 0 recorder
+.venv\Scripts\python.exe -m sniper.main enrich --loop   # Tier 1 socials resolver
 .venv\Scripts\python.exe -m sniper.main stats           # collection summary
 .venv\Scripts\python.exe -m sniper.main ratecheck       # throttling detector
 .venv\Scripts\python.exe -m sniper.main verify-program  # on-chain assumption canary
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
+
+Production is EC2 `107.20.45.160` (t3.micro). Deploy with
+`.\deploy\push-code.ps1 -RemoteHost <ip> -KeyFile <pem>`; on the box the CLI is
+just `sniper <cmd>`. Three units must all be active: `meme-sniper`,
+`meme-sniper-enrich`, `litestream`.
 
 Not a git repo yet. `uv` is not installed; `node` and `git` are.
 
@@ -77,6 +83,15 @@ Not a git repo yet. `uv` is not installed; `node` and `git` are.
 - **On-chain `creator` ≠ transaction signer on ~10–25% of launches** (proxy or
   bundler deploys). The layout is right; the mismatch is real and is itself a
   candidate signal.
+- **Token metadata rots within days, so Tier 1 is a race.** Measured 2026-08-06
+  on launches collected 2026-08-03: **36%** (5,784/16,197) already pointed at a
+  host returning 404 — `metadata.j7tracker.io` alone was 5,181 of them. Fetch
+  success is **98.6% near-real-time vs 64% at three days**. Metadata not fetched
+  close to launch is not pending, it is lost — hence an always-on worker.
+  Reading the URI on-chain makes the *URI* durable, **not the document**.
+- **Telegram is rare: 2.0%** of launches (364/18,143); twitter 73%, website 51%.
+  Only 1.5% carry all three. If the pre-BOOST 8.94x Telegram lift survives, that
+  rarity makes it a harsh but high-precision gate.
 - **Bonding-curve layout is derivable, not reverse-engineered.** pump.fun
   publishes no program source — only docs and IDL at
   `github.com/pump-fun/pump-public-docs` — but Anchor/Borsh is deterministic.
@@ -93,6 +108,22 @@ Not a git repo yet. `uv` is not installed; `node` and `git` are.
   against the 1,500–2,700 launches/hour residential baseline.
 - **Litestream must target a non-AWS bucket.** The AWS Free plan auto-closes
   the account at 6 months and takes same-account S3 with it.
+
+- **Absent socials are empty strings, not missing keys.** Real documents carry
+  `"website": "", "telegram": ""`. Testing key presence scores them as present
+  and inverts the signal Tier 1 exists to measure.
+
+- **A dead metadata host is not always an HTTP error.** One returns 404 with a
+  27 KB HTML page, others 404 with `application/json`. Success must mean
+  "parsed to a JSON object", not "did not raise".
+
+- **Litestream 0.5.x silently ignores unknown config keys.** 0.3.x-style
+  `retention:` under the replica parses fine and leaves you on the 24h default.
+  Verified with `bogus-key-xyz: 42` — exit 0. Check `litestream version` before
+  trusting any example.
+
+- **`PRAGMA integrity_check` returns `ok` on a zero-byte file.** Never gate a
+  backup or a data pull on it alone; check row counts too.
 
 ## Context that drives the design
 

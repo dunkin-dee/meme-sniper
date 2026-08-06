@@ -1,9 +1,13 @@
 # meme-sniper — Status & Roadmap
 
 **Project:** `C:\Users\dimad\projects\meme-sniper`
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-06
 **Phase 1 of 2.** Phase 1 = measure the regime. Phase 2 = fit a model, only if
 Phase 1's numbers justify it.
+
+**Live since 2026-08-05.** Recorder, Tier 1 enrichment and Litestream
+replication all running on EC2 (`107.20.45.160`, t3.micro). Repo at
+`github.com/dunkin-dee/meme-sniper`.
 
 > **Fresh session?** Read `CLAUDE.md` (auto-loads) and `docs/STREAM_NOTES.md`
 > first. STREAM_NOTES contains verified facts that contradict public docs.
@@ -37,9 +41,20 @@ durability via Litestream + periodic local pull.
 
 ## Current state
 
-**Working and live-validated.** 54 tests pass. Recorder connects to the live
-firehose and records ~2,100 launches/hour. `verify-program` confirms the
-on-chain assumptions hold (exit 0).
+**Collecting in production.** 71 tests pass. As of 2026-08-06, 25.8h into
+continuous collection on EC2:
+
+| | |
+|---|---|
+| launches | 36,228 (~1,400/h) |
+| migrations | 1,039 |
+| metadata resolved | 18,143 of 18,400 attempted (**98.6%**) |
+| promoted to Tier 2 | 13,926 |
+
+`ratecheck` returned exit 0 at 1,684/h with 0 reconnects — **PumpPortal does
+not throttle this AWS IP**, which was the single risk that could have
+invalidated the whole deployment tier. Litestream restore verified end to end
+against Backblaze B2 (5,820 rows recovered vs 5,821 live).
 
 ```
 CLAUDE.md                    agent working notes (auto-loaded)
@@ -53,15 +68,18 @@ src/sniper/
   curve.py                   verified curve math + BondingCurve account decode
   db.py                      SQLite schema v2 + migrations + write helpers
   logging_setup.py           heartbeat-oriented logging
-  main.py                    CLI: record | stats | ratecheck | verify-program
+  main.py                    CLI: record | enrich | stats | ratecheck | verify-program
   rpc.py                     rate-limited Solana JSON-RPC (seed for #6)
+  token2022.py               TLV extensions + on-chain TokenMetadata decode
   verify.py                  on-chain assumption canary
   ingest/pumpportal.py       Tier 0 firehose, single connection + backoff
+  enrich/metadata.py         Tier 1 socials resolver (always-on worker)
 tests/test_curve.py          20 tests, fixtures = real captured frames
 tests/test_ingest.py         20 tests, payloads = real captured frames
 tests/test_account_decode.py 14 tests, fixtures = real account bytes from chain
-deploy/                      systemd units, litestream.yml, bootstrap.sh, pull-data.ps1
-data/sniper.db               54 launches (smoke-test data only)
+tests/test_metadata.py       17 tests, fixtures = real fetched documents
+deploy/                      3 systemd units, litestream.yml, bootstrap.sh, push/pull scripts
+data/sniper.db               local: 16,601 launches (2026-08-03 residential run)
 ```
 
 ### Done
@@ -69,7 +87,12 @@ data/sniper.db               54 launches (smoke-test data only)
 - [x] **Scaffold** — config loader, SQLite schema v2 with migrations, logging
 - [x] **Tier 0 recorder** — validated against the live stream over two runs
 - [x] **Verified curve math** — `curve.py`, pinned by tests to real frames
-- [x] **EC2 deployment** — systemd, Litestream, pull script, runbook
+- [x] **EC2 deployment — LIVE** (2026-08-05). t3.micro/x86 (`t4g` is not
+      free-tier eligible on this plan). Three units, all `Restart=always`.
+      Throttling ruled out by measurement; Litestream → Backblaze B2 with a
+      **tested** restore.
+- [x] **#4 Tier 1 metadata enrichment** (2026-08-06) — `enrich/metadata.py`,
+      `token2022.py`, `sniper enrich --loop` as its own unit.
 - [x] **#3 Bonding-curve account layout** — decoded and verified against chain
       (`sniper verify-program`). Layout in `curve.py`, RPC client in `rpc.py`.
 - [x] **Program assumption canary** — mint/freeze authority, token program,
@@ -77,7 +100,6 @@ data/sniper.db               54 launches (smoke-test data only)
       suspected pump.fun upgrade.
 
 ### Not started
-- [ ] #4 Tier 1 metadata enrichment (socials gate)
 - [ ] #5 Tier 2 RugCheck + deployer history
 - [ ] #6 Tier 3 curve tracker + credit budget enforcement
 - [ ] #7 Features, scorer, alerts
@@ -104,6 +126,19 @@ Full evidence in `docs/STREAM_NOTES.md`.
 | Token program | **Token-2022**, not SPL Token (60/60); metadata extensions only |
 | Curve layout | fields end at byte 84; accounts over-allocated to 115 or 151 |
 | On-chain `creator` | differs from tx signer on ~10–25% (proxy deployers) |
+| **Metadata decay** | **36% of launches were behind a 404 host 3 days later** |
+| **Fetch success** | **98.6% near-real-time vs 64% at 3 days old** |
+| **Telegram is rare** | present on only **2.0%** of launches (364/18,143) |
+| Twitter / website | 73% / 51% present |
+| Stream `uri` vs chain | **0 mismatches over ~3,000 mints** — stream uri is reliable |
+
+**The socials distribution is a headline Phase 1 number.** Of 18,143 resolved
+documents: 23% have no socials, 29% one, 47% two, and only **1.5% all three**.
+Telegram at 2.0% is the striking one — pre-BOOST literature put the Telegram
+lift at 8.94x and all-three at 17.4x, and if only 2% of launches carry Telegram
+then `metadata.require_telegram: true` is a very harsh but potentially very
+high-precision gate. Whether that lift survives BOOST is exactly what #9 must
+test; do not assume it.
 
 **Traps already handled** (do not regress these):
 
@@ -117,60 +152,71 @@ Full evidence in `docs/STREAM_NOTES.md`.
 - A throttled stream looks identical to a quiet market → `ratecheck`.
 - Litestream must target a **non-AWS** bucket; the Free plan auto-closes the
   account at 6 months and takes same-account S3 with it.
+- **Absent socials are empty strings, not missing keys.** Real documents carry
+  `"website": "", "telegram": ""`. Testing key presence scores those as present
+  and inverts the signal. Pinned by `test_metadata.py`.
+- **A dead metadata host is not always an HTTP error.** `j7tracker` returns 404
+  with a 27 KB HTML page; others return 404 with `application/json`. Success
+  must mean "parsed to a JSON object", not "did not raise".
+- **Reading the URI on-chain does not rescue a dead host.** It makes the URI
+  durable, not the document it points at. Easy to overstate; the socials still
+  live on somebody else's server.
+- **Litestream 0.5.x ignores unrecognized config keys.** 0.3.x-style
+  `retention:` under the replica parses cleanly and silently leaves you on the
+  24h default. Verified by feeding it `bogus-key-xyz: 42` (exit 0).
+- **`PRAGMA integrity_check` returns `ok` on a zero-byte file.** Never gate a
+  backup or a pull on it alone; check row counts too.
 
 ---
 
 ## Immediate next actions
 
-**1. Start collecting — this gates everything.**
-The data cannot be backfilled and BOOST is only weeks old. Either run locally:
+**Collection is running and is the long pole — 2–3 weeks.** Everything below
+fits inside that window.
 
-```powershell
-.venv\Scripts\python.exe -m sniper.main record
-```
+**1. AWS account hygiene — the only unmitigated risk to the data.**
+The account auto-closes ~**2027-02-05**. Budgets alerts at $50/$100, and
+calendar reminders for **2027-01-05** and **2027-01-26**. Credits are not the
+constraint; the calendar is.
 
-or deploy per `docs/DEPLOY.md` (t4g.micro, ~$8.50/mo, ~$51 of the $200 credits
-over 6 months).
+**2. Merge or back up the local database.** `data/sniper.db` holds 16,601
+launches from the 2026-08-03 residential run and exists on one laptop only. The
+instance started fresh. `mint` is the primary key with `INSERT OR IGNORE`, so
+merging is safe.
 
-**2. If deploying, run the throttling check after 1 hour.**
+**3. Schedule `pull-data.ps1` daily** via Task Scheduler.
 
-```bash
-sudo -u sniper /opt/meme-sniper/.venv/bin/python -m sniper.main ratecheck --hours 1
-```
+**4. A second `ratecheck` at a different time of day.** The current evidence is
+one daytime hour plus a 25.8h average of ~1,400/h — inside the band, but market
+volume genuinely swings with the clock.
 
-Unresolved risk: whether PumpPortal throttles AWS IP ranges. No evidence either
-way was found — it must be measured. Exit 1 = likely throttled.
-
-**3. Day-one AWS hygiene** (from `docs/DEPLOY.md`): calendar reminders at month
-5, Budgets alerts at $50/$100, confirm the Litestream bucket is outside AWS,
-and do one verified `pull-data.ps1`.
+**5. Then #5 (Tier 2).**
 
 ---
 
 ## Roadmap
 
-### #4 Tier 1 — metadata enrichment (do this next; highest value per effort)
+### #4 Tier 1 — metadata enrichment — DONE (2026-08-06)
 
-`src/sniper/enrich/metadata.py`. Resolve `launches.uri` → extract
-twitter/telegram/website into `token_metadata`.
+`enrich/metadata.py` + `token2022.py`, running as `meme-sniper-enrich.service`.
+Resolves each launch's document and extracts twitter/telegram/website into
+`token_metadata`, promoting per `metadata.min_socials_to_promote`.
 
-The strongest published signal, and free: across 832,941 launches, Telegram
-present graduated at 1.485% vs 0.166% (**8.94x**, Cox HR 5.40); all three
-socials 1.919% vs 0.110% (**17.4x**).
+**It had to become an always-on worker, not a pre-analysis pass.** The
+prediction that third-party hosts "will 404 eventually" was already true when
+measured: 36% of three-day-old launches were behind a dead host. Fetch success
+is 98.6% near-real-time against 64% at three days. Metadata not fetched close to
+launch is not pending, it is lost.
 
-- **Check the mint account first.** Token-2022's TokenMetadata extension stores
-  name, symbol and URI **on-chain** (verified 60/60). That is free, permanent,
-  batchable at 100 mints per `getMultipleAccounts`, and immune to the IPFS/host
-  decay that will eventually rot `launches.uri`. The socials still live in the
-  JSON at that URI, so the HTTP fetch is still needed — but the URI itself
-  should come from chain, and this is time-sensitive: third-party metadata hosts
-  (`meta.uxento.io`, `metadata.j7tracker.io`) will 404 eventually.
-- IPFS gateway fallbacks + `httpx` with timeout; observed URIs include
-  `metadata.j7tracker.io` and `ipfs.io` — handle both plain HTTPS and IPFS.
-- Bounded concurrency (`metadata.max_concurrent`), cache by URI.
-- Promote to Tier 2 per `metadata.min_socials_to_promote`.
-- **Free spam filter:** duplicate `(creator, uri)` pairs were observed launching
-  seconds apart — cheap and effective.
+Delivered: IPFS gateway fallback, bounded concurrency, per-run URI cache,
+on-chain URI resolution via the Token-2022 TokenMetadata extension, and failed
+fetches recorded rather than skipped (so "had no socials" stays distinguishable
+from "never looked").
+
+**Still to do here:** the duplicate `(creator, uri)` spam filter. 708 such
+groups exist in 16,601 local launches. It is fully derivable in SQL from data
+already stored, so it needs no schema change and can be a feature in #7 rather
+than a column — but it is not wired into the promotion decision yet.
 
 ### #3 Bonding-curve account layout — DONE (2026-08-03)
 
@@ -238,11 +284,15 @@ capital — make sense.**
 
 ## Verification
 
-- `pytest tests/ -q` → 54 passing. Fixtures are real captured frames and real
-  on-chain account bytes, so a pump.fun parameter change fails the suite rather
-  than silently corrupting features.
+- `pytest tests/ -q` → 71 passing. Fixtures are real captured frames, real
+  on-chain account bytes and real fetched metadata documents, so a pump.fun
+  parameter change fails the suite rather than silently corrupting features.
 - `sniper stats` → counts, pool split, cohort graduation rate (needs >24h).
 - `sniper ratecheck --hours 1` → throttling detector.
+- `sniper enrich --limit N` → one Tier 1 pass, prints ok/failed/promoted.
+  A falling `ok` rate means metadata hosts are dying faster than we fetch.
+- `systemctl is-active meme-sniper meme-sniper-enrich litestream` → all three
+  must be `active`. A code push must never be the reason one stopped.
 - `sniper verify-program --sample 40` → on-chain assumption canary. Run it after
   any suspected pump.fun upgrade; exit 1 means an assumption broke.
 - Cross-check a tracked token's polled price against DexScreener for the same
