@@ -133,8 +133,12 @@ metadata:
   retry_backoff_seconds: 1.5
   # Some metadata hosts reject default client user-agents.
   user_agent: "meme-sniper/0.1 (+research)"
-  # Seconds to sleep when there is no backlog.
-  idle_sleep_seconds: 5
+  # Seconds to sleep when there is no backlog. This is the dominant term in
+  # end-to-end socials lag once caught up: a launch arriving just after a pass
+  # waits this long before anyone looks at it. Measured 2026-08-06 at 5s, 79%
+  # of launches were enriched within 5s and 91% within 15s. The poll is a local
+  # SQLite query, so a tighter interval is close to free.
+  idle_sleep_seconds: 2
   # Read name/symbol/uri from the mint's Token-2022 TokenMetadata extension
   # rather than trusting the stream frame. Authoritative, batched 100 per call.
   # It makes the URI durable, NOT the document it points at - it does not

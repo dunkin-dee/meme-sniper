@@ -262,11 +262,16 @@ async def _resolve_uris_onchain(
 ) -> dict[str, str]:
     """Read each mint's uri from its Token-2022 TokenMetadata extension.
 
-    Authoritative and batched 100 per call. Worth being honest about the
-    limit: this makes the *uri* durable, not the document it points at, so it
-    does not rescue a launch whose host has already died. Its real value is
-    covering launches whose stream frame carried no uri, and flagging
-    disagreement between stream and chain.
+    Called ONLY for launches whose stream frame carried no uri. It used to run
+    for every launch, which put an RPC round-trip on the critical path ahead of
+    every document fetch - and measurement said that bought nothing: 0
+    stream-vs-chain mismatches over ~3,000 mints. Since metadata hosts die
+    within days, anything that delays the fetch is a direct cost, and a
+    dependency that can rate-limit or stall is a risk to the one step that
+    cannot wait.
+
+    Coverage is why it still exists: ~0.5% of frames arrive with no uri at all
+    (84 of 16,601 locally), and for those, chain is the only source.
     """
     out: dict[str, str] = {}
     mints = [r["mint"] for r in rows]
@@ -307,9 +312,14 @@ async def run_once(cfg: Config, conn: sqlite3.Connection, limit: int | None = No
     if not rows:
         return stats
 
+    # Only the frames with no uri need chain, and they are rare. Everything
+    # else goes straight to the fetch - the RPC must not sit between a launch
+    # and its document.
     onchain: dict[str, str] = {}
     if bool(cfg.get("metadata.resolve_uri_onchain")):
-        onchain = await _resolve_uris_onchain(cfg, rows, stats)
+        missing_uri = [r for r in rows if not r["uri"]]
+        if missing_uri:
+            onchain = await _resolve_uris_onchain(cfg, missing_uri, stats)
 
     min_socials = int(cfg.get("metadata.min_socials_to_promote"))
     require_telegram = bool(cfg.get("metadata.require_telegram"))

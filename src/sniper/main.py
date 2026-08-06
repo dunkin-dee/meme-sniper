@@ -149,6 +149,44 @@ def show_stats(cfg: Config) -> int:
             print("    not enough history yet - needs launches older than 24h.")
             print("    (migrations/launches would be meaningless here: different cohorts)")
 
+        # Tier 1 health. Metadata hosts 404 within days, so the two numbers that
+        # matter are how FAST we fetch and how OFTEN it works. Both are measured
+        # over the last hour rather than all time, because the lifetime average
+        # is dominated by the initial backfill and hides a live regression. A
+        # rising lag or a falling success rate is data being permanently lost,
+        # not a job running behind.
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN t.fetched_at - l.received_at < 15 THEN 1 ELSE 0 END) AS fast,
+                   SUM(t.fetch_ok) AS ok
+            FROM token_metadata t
+            JOIN launches l ON l.mint = t.mint
+            WHERE t.fetched_at >= ?
+            """,
+            (time.time() - 3600,),
+        ).fetchone()
+
+        pending = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM launches l
+            LEFT JOIN token_metadata t ON t.mint = l.mint
+            WHERE l.pool = 'pump' AND t.mint IS NULL
+            """
+        ).fetchone()["n"]
+
+        print("\n  Tier 1 metadata (last hour):")
+        if row and row["n"]:
+            n, fast, ok = row["n"], row["fast"] or 0, row["ok"] or 0
+            print(f"    enriched:          {n:,}")
+            print(f"    within 15s:        {fast / n * 100:.1f}%")
+            print(f"    fetch success:     {ok / n * 100:.1f}%  "
+                  f"({n - ok:,} host dead/unreachable)")
+        else:
+            print("    nothing enriched in the last hour - is the worker running?")
+        print(f"    awaiting enrichment: {pending:,}")
+
         inst = conn.execute(
             "SELECT COUNT(*) n FROM migrations WHERE instant_bond = 1"
         ).fetchone()["n"]
