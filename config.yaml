@@ -122,7 +122,25 @@ metadata:
     - "https://gateway.pinata.cloud/ipfs/"
   timeout_seconds: 8
   max_concurrent: 12
+  # A failed fetch is retried no sooner than this. Mostly it will never help -
+  # a 404 host is dead for good - but it separates a transient blip from a
+  # genuinely vanished document without hammering either.
   cache_ttl_seconds: 86400
+  # Launches per enrichment pass.
+  batch_size: 200
+  # Attempts per URL, transport errors only; a 404 is terminal and never retried.
+  max_attempts: 2
+  retry_backoff_seconds: 1.5
+  # Some metadata hosts reject default client user-agents.
+  user_agent: "meme-sniper/0.1 (+research)"
+  # Seconds to sleep when there is no backlog.
+  idle_sleep_seconds: 5
+  # Read name/symbol/uri from the mint's Token-2022 TokenMetadata extension
+  # rather than trusting the stream frame. Authoritative, batched 100 per call.
+  # It makes the URI durable, NOT the document it points at - it does not
+  # rescue a launch whose metadata host already died. Costs RPC credits shared
+  # with #6's curve tracker, so it is switchable.
+  resolve_uri_onchain: true
   # Promote to Tier 2 only if at least this many socials are present.
   # Pre-BOOST evidence: telegram alone 8.94x lift, all three 17.4x.
   min_socials_to_promote: 1

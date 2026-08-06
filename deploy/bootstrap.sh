@@ -141,11 +141,20 @@ log "Installing systemd units"
 cp "$APP_DIR"/deploy/systemd/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable meme-sniper.service
+systemctl enable meme-sniper-enrich.service
 
 log "Starting recorder"
 systemctl restart meme-sniper.service
 sleep 5
 systemctl --no-pager --lines=15 status meme-sniper.service || true
+
+# Tier 1 enrichment is time-critical: metadata hosts 404 within days, so a
+# launch whose document was not fetched close to launch is not "pending", it is
+# lost. Restarted on every deploy alongside the recorder.
+log "Starting Tier 1 enrichment"
+systemctl restart meme-sniper-enrich.service
+sleep 3
+systemctl is-active meme-sniper-enrich.service || true
 
 # Bring replication back up if it has already been configured. A code push must
 # never be the reason backups stopped, and "still says success while the replica

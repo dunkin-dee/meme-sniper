@@ -430,6 +430,51 @@ def record_migration(
     return cur.rowcount > 0
 
 
+def record_token_metadata(
+    conn: sqlite3.Connection,
+    mint: str,
+    socials: Any | None,
+    fetch_error: str | None = None,
+    uri: str | None = None,
+) -> None:
+    """Upsert a Tier 1 metadata row.
+
+    A failed fetch is recorded, not skipped. Whether a token's metadata host was
+    already dead is itself data - 36% of launches collected on 2026-08-03 were
+    behind a 404 host three days later - and without a row there is no way to
+    distinguish "had no socials" from "never looked".
+
+    REPLACE rather than IGNORE so a later successful retry supersedes an earlier
+    failure.
+    """
+    ok = socials is not None
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO token_metadata
+            (mint, has_twitter, has_telegram, has_website, social_count,
+             twitter, telegram, website, description, image,
+             fetch_ok, fetch_error, fetched_at, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            mint,
+            1 if ok and socials.twitter else 0,
+            1 if ok and socials.telegram else 0,
+            1 if ok and socials.website else 0,
+            socials.count if ok else 0,
+            socials.twitter if ok else None,
+            socials.telegram if ok else None,
+            socials.website if ok else None,
+            socials.description if ok else None,
+            socials.image if ok else None,
+            1 if ok else 0,
+            fetch_error,
+            time.time(),
+            json.dumps({"uri": uri}, separators=(",", ":")) if uri else None,
+        ),
+    )
+
+
 def log_event(conn: sqlite3.Connection, kind: str, detail: str | None = None) -> None:
     conn.execute(
         "INSERT INTO events (at, kind, detail) VALUES (?, ?, ?)",

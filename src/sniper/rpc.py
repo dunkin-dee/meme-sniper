@@ -36,6 +36,10 @@ class RpcError(RuntimeError):
     """Raised when the RPC endpoint returns an error or malformed response."""
 
 
+# Process-level, so a worker constructing a client per pass does not repeat it.
+_WARNED_NO_KEY = False
+
+
 @dataclass(frozen=True)
 class AccountInfo:
     """A decoded account, or the fact that it does not exist."""
@@ -69,7 +73,13 @@ class SolanaRpc:
 
         # An unexpanded ${...} or an empty api-key means no key was provided.
         if "api-key=" in self.url and self.url.rstrip().endswith("api-key="):
-            log.info("no HELIUS_API_KEY set; using public RPC endpoint")
+            # Once per process, not once per client: the enrichment worker
+            # builds one of these every pass, which turned this into a line
+            # every few seconds in the journal.
+            global _WARNED_NO_KEY
+            if not _WARNED_NO_KEY:
+                log.info("no HELIUS_API_KEY set; using public RPC endpoint")
+                _WARNED_NO_KEY = True
             self.url = self.fallback_url
 
         self._min_interval = 1.0 / self.max_rps if self.max_rps > 0 else 0.0

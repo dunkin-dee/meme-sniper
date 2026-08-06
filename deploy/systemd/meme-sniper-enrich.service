@@ -1,0 +1,50 @@
+[Unit]
+Description=meme-sniper Tier 1 metadata enrichment
+Documentation=file:///opt/meme-sniper/docs/DEPLOY.md
+After=network-online.target meme-sniper.service
+Wants=network-online.target
+
+# [Unit], not [Service] - systemd ignores these in [Service]. See the note in
+# meme-sniper.service.
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+User=sniper
+Group=sniper
+WorkingDirectory=/opt/meme-sniper
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/meme-sniper/env
+ExecStart=/opt/meme-sniper/.venv/bin/python -m sniper.main enrich --loop
+
+# This is a race against metadata expiry, not a background chore. Measured
+# 2026-08-06, three days after collection, 36% of recorded launches already
+# pointed at a host returning 404. Time spent stopped is documents lost for
+# good, so restart is unconditional.
+Restart=always
+RestartSec=10s
+
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Deliberately a separate unit from the recorder. This process makes outbound
+# HTTP to arbitrary third-party hosts - by far the least trustworthy dependency
+# here - and the recorder must never die from a downstream fault.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/meme-sniper/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meme-sniper-enrich
+
+[Install]
+WantedBy=multi-user.target

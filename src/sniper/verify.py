@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 
 import base58
 
-from . import curve, db
+from . import curve, db, token2022
 from .config import Config, resolve_path
 from .rpc import AccountInfo, RpcError, SolanaRpc
 
@@ -58,13 +58,10 @@ log = logging.getLogger("sniper.verify")
 #   44  decimals           u8
 #   45  is_initialized     bool
 #   46  freeze_authority   COption<Pubkey>  4-byte tag + 32
-MINT_ACCOUNT_SIZE = 82
+MINT_ACCOUNT_SIZE = token2022.MINT_ACCOUNT_SIZE
 
-# Token-2022 mints reuse that 82-byte prefix, then pad to 165 (so they cannot be
-# confused with a 165-byte token Account), put an account_type discriminator at
-# 165, and store extensions as TLV records from 166: u16 type, u16 length, body.
-TLV_ACCOUNT_TYPE_OFFSET = 165
-TLV_START = 166
+# Token-2022 mints reuse that 82-byte prefix and append a TLV extension region;
+# the layout and its constants live in ``token2022``.
 
 # The System Program owning a "curve" means the account does not exist yet.
 # getMultipleAccounts can return a zero-length System-owned stub rather than
@@ -113,18 +110,11 @@ def token_2022_extensions(data: bytes) -> list[int]:
     Returns empty for a base 82-byte mint. Malformed or truncated TLV stops the
     walk rather than raising: a partial read is still worth reporting, and this
     is a diagnostic, not a consensus-critical parser.
+
+    The walk itself lives in ``token2022`` so Tier 1 enrichment can reuse it to
+    pull the TokenMetadata body rather than reimplementing TLV parsing.
     """
-    if len(data) <= TLV_ACCOUNT_TYPE_OFFSET:
-        return []
-    out: list[int] = []
-    off = TLV_START
-    while off + 4 <= len(data):
-        ext_type, ext_len = struct.unpack_from("<HH", data, off)
-        if ext_type == 0 and ext_len == 0:
-            break
-        out.append(ext_type)
-        off += 4 + ext_len
-    return out
+    return token2022.extension_types(data)
 
 
 @dataclass

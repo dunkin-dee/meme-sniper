@@ -71,6 +71,29 @@ async def run_recorder(cfg: Config) -> int:
     return 0
 
 
+async def run_enrich(cfg: Config, loop: bool, limit: int | None) -> int:
+    """Tier 1 metadata enrichment.
+
+    Deliberately a separate process from the recorder rather than another task
+    in its loop. The recorder must never die from a downstream fault, and this
+    one makes outbound HTTP to arbitrary third-party hosts - the least
+    trustworthy dependency in the system.
+    """
+    from .enrich import metadata
+
+    conn = db.connect(resolve_path(cfg, "database.path"))
+    try:
+        if loop:
+            db.log_event(conn, "enrich_start")
+            log.info("metadata enrichment starting (continuous)")
+            return await metadata.run_loop(cfg, conn)
+        stats = await metadata.run_once(cfg, conn, limit)
+        print(stats.snapshot())
+        return 0
+    finally:
+        conn.close()
+
+
 def show_stats(cfg: Config) -> int:
     conn = db.connect(resolve_path(cfg, "database.path"))
     try:
@@ -222,6 +245,13 @@ def cli(argv: list[str] | None = None) -> int:
              "(detects datacenter-IP throttling)",
     )
     rc.add_argument("--hours", type=float, default=1.0, help="window to measure")
+    en = sub.add_parser(
+        "enrich",
+        help="Tier 1: resolve each launch's metadata document and extract socials. "
+             "Time-critical - metadata hosts 404 within days.",
+    )
+    en.add_argument("--loop", action="store_true", help="run continuously")
+    en.add_argument("--limit", type=int, default=None, help="launches in this pass")
     vp = sub.add_parser(
         "verify-program",
         help="verify pump.fun program assumptions against chain (mint/freeze "
@@ -242,6 +272,11 @@ def cli(argv: list[str] | None = None) -> int:
         return show_stats(cfg)
     if args.command == "ratecheck":
         return rate_check(cfg, args.hours)
+    if args.command == "enrich":
+        try:
+            return asyncio.run(run_enrich(cfg, args.loop, args.limit))
+        except KeyboardInterrupt:
+            return 0
     if args.command == "verify-program":
         from .verify import verify_program
 
